@@ -1,0 +1,140 @@
+name: "PostgreSQL Database Deployment"
+description: "Smart PostgreSQL deployment with automatic storage capacity detection"
+
+inputs:
+  # Required
+  oc_namespace:
+    description: "OpenShift namespace"
+    required: true
+    validation: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+  oc_token:
+    description: "OpenShift token"
+    required: true
+    validation: "^[A-Za-z0-9-_]+$"
+  values_file:
+    description: "Path to the values.yml file to use for the deployment"
+    required: true
+    validation: "^.+\\.(yml|yaml)$"
+
+  # Database type selection
+  database_type:
+    description: "Type of PostgreSQL deployment (crunchy, single, auto)"
+    default: "auto"
+    required: false
+    validation: "^(crunchy|single|auto)$"
+
+  # Force options
+  force_type:
+    description: "Force specific database type regardless of storage capacity"
+    default: ""
+    required: false
+    validation: "^(crunchy|single|)$"
+
+  # Storage thresholds
+  min_storage_gb:
+    description: "Minimum storage required for Crunchy deployment (GB)"
+    default: "4"
+    required: false
+    validation: "^[0-9]+$"
+
+  # Pass through to crunchy action
+  environment:
+    description: "Environment name; omit for PRs"
+    required: false
+    validation: "^.+$"
+  triggers:
+    description: "Paths used to trigger a deployment"
+    required: false
+    validation: "^(.+)$"
+  oc_server:
+    description: "OpenShift server"
+    default: "https://api.silver.devops.gov.bc.ca:6443"
+    required: false
+    validation: "^https?://.+:6443$"
+  s3_access_key:
+    description: "S3 access key"
+    required: false
+  s3_secret_key:
+    description: "S3 secret key"
+    required: false
+  s3_bucket:
+    description: "S3 bucket"
+    required: false
+  s3_endpoint:
+    description: "S3 endpoint"
+    required: false
+  force_cleanup:
+    description: "Force cleanup of the database"
+    default: false
+    required: false
+    type: boolean
+  release_name:
+    description: "Release name"
+    default: ""
+    required: false
+  diff_branch:
+    description: "Branch to compare against for diff triggers"
+    required: false
+
+outputs:
+  database_type:
+    description: "The database type that was deployed"
+    value: ${{ steps.deploy.outputs.database_type }}
+  release:
+    description: "Release name"
+    value: ${{ steps.deploy.outputs.release }}
+  cluster:
+    description: "Cluster name"
+    value: ${{ steps.deploy.outputs.cluster }}
+
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      id: check_storage
+      run: |
+        # Determine database type based on storage capacity
+        if [ "${{ inputs.force_type }}" != "" ]; then
+          echo "database_type=${{ inputs.force_type }}" >> $GITHUB_OUTPUT
+          echo "Using forced database type: ${{ inputs.force_type }}"
+          exit 0
+        fi
+
+        if [ "${{ inputs.database_type }}" = "auto" ]; then
+          echo "Checking storage capacity for automatic database type selection..."
+          ./scripts/check_storage_capacity.sh "${{ inputs.oc_namespace }}" "${{ inputs.min_storage_gb }}"
+          echo "database_type=${{ steps.check_storage.outputs.recommended_type }}" >> $GITHUB_OUTPUT
+        else
+          echo "database_type=${{ inputs.database_type }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Deploy Crunchy PostgreSQL
+      if: steps.check_storage.outputs.database_type == 'crunchy'
+      uses: bcgov/action-crunchy@main
+      id: deploy
+      with:
+        oc_namespace: ${{ inputs.oc_namespace }}
+        oc_token: ${{ inputs.oc_token }}
+        environment: ${{ inputs.environment }}
+        triggers: ${{ inputs.triggers }}
+        oc_server: ${{ inputs.oc_server }}
+        values_file: ${{ inputs.values_file }}
+        s3_access_key: ${{ inputs.s3_access_key }}
+        s3_secret_key: ${{ inputs.s3_secret_key }}
+        s3_bucket: ${{ inputs.s3_bucket }}
+        s3_endpoint: ${{ inputs.s3_endpoint }}
+        force_cleanup: ${{ inputs.force_cleanup }}
+        release_name: ${{ inputs.release_name }}
+        diff_branch: ${{ inputs.diff_branch }}
+
+    - name: Deploy Single PostgreSQL
+      if: steps.check_storage.outputs.database_type == 'single'
+      shell: bash
+      id: deploy
+      run: |
+        ./scripts/deploy_postgres.sh \
+          --namespace "${{ inputs.oc_namespace }}" \
+          --token "${{ inputs.oc_token }}" \
+          --values-file "${{ inputs.values_file }}" \
+          --release-name "${{ inputs.release_name }}" \
+          --environment "${{ inputs.environment }}"
